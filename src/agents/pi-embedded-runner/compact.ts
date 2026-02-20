@@ -284,7 +284,6 @@ export async function compactEmbeddedPiSessionDirect(
     const reason = error ?? `Unknown model: ${provider}/${modelId}`;
     return fail(reason);
   }
-  let resolvedCompactionApiKey: string | undefined;
   try {
     const apiKeyInfo = await getApiKeyForModel({
       model,
@@ -305,10 +304,8 @@ export async function compactEmbeddedPiSessionDirect(
         githubToken: apiKeyInfo.apiKey,
       });
       authStorage.setRuntimeApiKey(model.provider, copilotToken.token);
-      resolvedCompactionApiKey = copilotToken.token;
     } else {
       authStorage.setRuntimeApiKey(model.provider, apiKeyInfo.apiKey);
-      resolvedCompactionApiKey = apiKeyInfo.apiKey;
     }
   } catch (err) {
     const reason = describeUnknownError(err);
@@ -631,12 +628,6 @@ export async function compactEmbeddedPiSessionDirect(
           sessionId: params.sessionId,
           workspaceDir: params.workspaceDir,
           messageProvider: params.messageChannel ?? params.messageProvider,
-          compactionModel: {
-            provider: model.provider,
-            id: model.id,
-            api: model.api,
-          },
-          compactionApiKey: resolvedCompactionApiKey,
         };
         if (hookRunner?.hasHooks("before_compaction")) {
           hookRunner
