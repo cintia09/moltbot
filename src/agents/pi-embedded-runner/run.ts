@@ -863,6 +863,32 @@ export async function runEmbeddedPiAgent(
                 },
               };
             }
+            // Handle vision-not-enabled errors by stripping images and retrying
+            if (
+              !emptyResponseRetried &&
+              /vision is not enabled|vision[- ]?not[- ]?supported|does not support (vision|image)|image[_ ]?input.*not[_ ]?supported|cannot process images/i.test(
+                errorText,
+              )
+            ) {
+              const visionHookRunner = getGlobalHookRunner();
+              if (visionHookRunner?.hasHooks("on_empty_response")) {
+                const visionResult = await visionHookRunner.runOnEmptyResponse(
+                  {
+                    sessionFile: params.sessionFile,
+                    provider: activeErrorContext.provider,
+                    model: activeErrorContext.model,
+                  },
+                  hookCtx,
+                );
+                if (visionResult?.retry) {
+                  emptyResponseRetried = true;
+                  log.warn(
+                    `vision error detected for ${activeErrorContext.provider}/${activeErrorContext.model}; images stripped, retrying`,
+                  );
+                  continue;
+                }
+              }
+            }
             const promptFailoverReason = classifyFailoverReason(errorText);
             if (promptFailoverReason && promptFailoverReason !== "timeout" && lastProfileId) {
               await markAuthProfileFailure({
