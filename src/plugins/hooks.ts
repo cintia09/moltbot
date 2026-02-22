@@ -730,6 +730,9 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
       event,
       ctx,
       mergeOnAllCandidatesFailed,
+    );
+  }
+
   /**
    * Run on_empty_response hook.
    * Fired when the model returns an empty assistant response.
