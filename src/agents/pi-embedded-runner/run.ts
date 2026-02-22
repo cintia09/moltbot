@@ -899,31 +899,53 @@ export async function runEmbeddedPiAgent(
                 },
               };
             }
-            // Handle vision-not-enabled errors by stripping images and retrying
+            // Handle vision-not-enabled errors: return friendly message and strip
+            // images from session file to prevent cascading failures on follow-ups.
             if (
-              !emptyResponseRetried &&
               /vision is not enabled|vision[- ]?not[- ]?supported|does not support (vision|image)|image[_ ]?input.*not[_ ]?supported|cannot process images/i.test(
                 errorText,
               )
             ) {
+              // Strip images from session file so subsequent prompts don't reload them
               const visionHookRunner = getGlobalHookRunner();
               if (visionHookRunner?.hasHooks("on_empty_response")) {
-                const visionResult = await visionHookRunner.runOnEmptyResponse(
-                  {
-                    sessionFile: params.sessionFile,
-                    provider: activeErrorContext.provider,
-                    model: activeErrorContext.model,
-                  },
-                  hookCtx,
-                );
-                if (visionResult?.retry) {
-                  emptyResponseRetried = true;
-                  log.warn(
-                    `vision error detected for ${activeErrorContext.provider}/${activeErrorContext.model}; images stripped, retrying`,
+                try {
+                  await visionHookRunner.runOnEmptyResponse(
+                    {
+                      sessionFile: params.sessionFile,
+                      provider: activeErrorContext.provider,
+                      model: activeErrorContext.model,
+                    },
+                    hookCtx,
                   );
-                  continue;
+                } catch {
+                  // best-effort cleanup
                 }
               }
+              log.warn(
+                `vision error for ${activeErrorContext.provider}/${activeErrorContext.model}: ${errorText}`,
+              );
+              return {
+                payloads: [
+                  {
+                    text:
+                      "This model/provider does not support image input. " +
+                      "Images have been removed from the conversation. " +
+                      "Please resend your message, or switch to a vision-capable model.",
+                    isError: true,
+                  },
+                ],
+                meta: {
+                  durationMs: Date.now() - started,
+                  agentMeta: {
+                    sessionId: sessionIdUsed,
+                    provider,
+                    model: model.id,
+                  },
+                  systemPromptReport: attempt.systemPromptReport,
+                  error: { kind: "vision_not_supported", message: errorText },
+                },
+              };
             }
             const promptFailoverReason = classifyFailoverReason(errorText);
             await maybeMarkAuthProfileFailure({
