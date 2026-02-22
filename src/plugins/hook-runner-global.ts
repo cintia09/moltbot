@@ -17,9 +17,18 @@ let globalRegistry: PluginRegistry | null = null;
 
 /**
  * Initialize the global hook runner with a plugin registry.
- * Called once when plugins are loaded during gateway startup.
+ * Called when plugins are loaded. Only the first call takes effect —
+ * subsequent calls from runtime plugin reloads (e.g. tool resolution)
+ * are ignored to prevent replacing the gateway-startup hook runner
+ * with a stale or incomplete registry.
  */
 export function initializeGlobalHookRunner(registry: PluginRegistry): void {
+  if (globalHookRunner) {
+    // Already initialized during gateway startup. Don't replace — runtime
+    // callers like tools.ts may load plugins with a changed config that
+    // omits hook-bearing plugins, which would silently drop all hooks.
+    return;
+  }
   globalRegistry = registry;
   globalHookRunner = createHookRunner(registry, {
     logger: {
@@ -30,7 +39,7 @@ export function initializeGlobalHookRunner(registry: PluginRegistry): void {
     catchErrors: true,
   });
 
-  const hookCount = registry.hooks.length;
+  const hookCount = registry.typedHooks.length + registry.hooks.length;
   if (hookCount > 0) {
     log.info(`hook runner initialized with ${hookCount} registered hooks`);
   }
