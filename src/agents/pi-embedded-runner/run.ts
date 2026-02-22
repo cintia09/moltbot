@@ -491,6 +491,7 @@ export async function runEmbeddedPiAgent(
       const MAX_RUN_LOOP_ITERATIONS = resolveMaxRunRetryIterations(profileCandidates.length);
       let overflowCompactionAttempts = 0;
       let toolResultTruncationAttempted = false;
+      let emptyResponseRetried = false;
       const usageAccumulator = createUsageAccumulator();
       let lastRunPromptUsage: ReturnType<typeof normalizeUsage> | undefined;
       let autoCompactionCount = 0;
@@ -1077,6 +1078,29 @@ export async function runEmbeddedPiAgent(
               messagingToolSentTargets: attempt.messagingToolSentTargets,
               successfulCronAdds: attempt.successfulCronAdds,
             };
+          }
+
+          // Empty response hook — let plugins handle empty model output
+          // (e.g. strip image blocks from context and retry)
+          if (!timedOut && !aborted && payloads.length === 0 && !emptyResponseRetried) {
+            const emptyHookRunner = getGlobalHookRunner();
+            if (emptyHookRunner?.hasHooks("on_empty_response")) {
+              const emptyResult = await emptyHookRunner.runOnEmptyResponse(
+                {
+                  sessionFile: params.sessionFile,
+                  provider: activeErrorContext.provider,
+                  model: activeErrorContext.model,
+                },
+                hookCtx,
+              );
+              if (emptyResult?.retry) {
+                emptyResponseRetried = true;
+                log.debug(
+                  `on_empty_response hook requested retry (provider=${activeErrorContext.provider} model=${activeErrorContext.model})`,
+                );
+                continue; // retry the attempt with modified session
+              }
+            }
           }
 
           log.debug(

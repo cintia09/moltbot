@@ -319,7 +319,9 @@ export type PluginHookName =
   | "subagent_spawned"
   | "subagent_ended"
   | "gateway_start"
-  | "gateway_stop";
+  | "gateway_stop"
+  | "on_all_candidates_failed"
+  | "on_empty_response";
 
 // Agent context shared across agent hooks
 export type PluginHookAgentContext = {
@@ -653,6 +655,39 @@ export type PluginHookGatewayStopEvent = {
   reason?: string;
 };
 
+// on_all_candidates_failed hook — fired when all model candidates have failed
+export type PluginHookOnAllCandidatesFailedEvent = {
+  /** Per-candidate attempt results. */
+  attempts: ReadonlyArray<{
+    provider: string;
+    model: string;
+    error: string;
+    reason?: string;
+  }>;
+  /** Current retry round (0-based). Plugins should compare against their maxRounds. */
+  round: number;
+};
+
+export type PluginHookOnAllCandidatesFailedResult = {
+  /** If true, retry all candidates after delayMs. */
+  retry?: boolean;
+  /** Delay in ms before retrying. */
+  delayMs?: number;
+};
+
+// on_empty_response hook — fired when model returns empty assistant content
+export type PluginHookOnEmptyResponseEvent = {
+  /** Path to the session JSONL file (plugins may modify it before retry). */
+  sessionFile?: string;
+  provider: string;
+  model: string;
+};
+
+export type PluginHookOnEmptyResponseResult = {
+  /** If true, retry the prompt (runner will re-read the session file). */
+  retry?: boolean;
+};
+
 // Hook handler types mapped by hook name
 export type PluginHookHandlerMap = {
   before_model_resolve: (
@@ -751,6 +786,20 @@ export type PluginHookHandlerMap = {
     event: PluginHookGatewayStopEvent,
     ctx: PluginHookGatewayContext,
   ) => Promise<void> | void;
+  on_all_candidates_failed: (
+    event: PluginHookOnAllCandidatesFailedEvent,
+    ctx: PluginHookAgentContext,
+  ) =>
+    | Promise<PluginHookOnAllCandidatesFailedResult | void>
+    | PluginHookOnAllCandidatesFailedResult
+    | void;
+  on_empty_response: (
+    event: PluginHookOnEmptyResponseEvent,
+    ctx: PluginHookAgentContext,
+  ) =>
+    | Promise<PluginHookOnEmptyResponseResult | void>
+    | PluginHookOnEmptyResponseResult
+    | void;
 };
 
 export type PluginHookRegistration<K extends PluginHookName = PluginHookName> = {
