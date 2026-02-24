@@ -1029,6 +1029,7 @@ export async function runEmbeddedAttempt(
           workspaceDir: params.workspaceDir,
           messageProvider: params.messageProvider ?? undefined,
         };
+        const preHookMessageCount = activeSession.messages.length;
         const hookResult = await resolvePromptBuildHookResult({
           prompt: params.prompt,
           messages: activeSession.messages,
@@ -1036,6 +1037,17 @@ export async function runEmbeddedAttempt(
           hookRunner,
           legacyBeforeAgentStartResult: params.legacyBeforeAgentStartResult,
         });
+
+        // If a plugin (e.g. smart-trim) mutated the messages array in-place,
+        // persist the changes so that downstream compaction sees the trimmed set.
+        if (activeSession.messages.length !== preHookMessageCount) {
+          activeSession.agent.replaceMessages(activeSession.messages);
+          log.info(
+            `hooks: persisted message mutation after before_prompt_build ` +
+              `(${preHookMessageCount} → ${activeSession.messages.length} messages)`,
+          );
+        }
+
         {
           if (hookResult?.prependContext) {
             effectivePrompt = `${hookResult.prependContext}\n\n${params.prompt}`;
