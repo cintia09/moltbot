@@ -17,18 +17,12 @@ let globalRegistry: PluginRegistry | null = null;
 
 /**
  * Initialize the global hook runner with a plugin registry.
- * Called when plugins are loaded. Only the first call takes effect —
- * subsequent calls from runtime plugin reloads (e.g. tool resolution)
- * are ignored to prevent replacing the gateway-startup hook runner
- * with a stale or incomplete registry.
+ * Called exclusively from loadGatewayPlugins() during gateway startup
+ * and SIGUSR1 in-process restarts. Not called from runtime plugin
+ * reloads (tools, providers) — those use loadOpenClawPlugins() which
+ * no longer triggers hook runner initialization.
  */
 export function initializeGlobalHookRunner(registry: PluginRegistry): void {
-  if (globalHookRunner) {
-    // Already initialized during gateway startup. Don't replace — runtime
-    // callers like tools.ts may load plugins with a changed config that
-    // omits hook-bearing plugins, which would silently drop all hooks.
-    return;
-  }
   globalRegistry = registry;
   globalHookRunner = createHookRunner(registry, {
     logger: {
