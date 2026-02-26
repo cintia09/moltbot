@@ -457,9 +457,10 @@ export class KnowledgeStore {
     // Adaptive minimum score based on effective query-token count.
     // Short queries have few tokens after CJK bigram tokenization + IDF
     // filtering, making it nearly impossible to reach a 0.5 threshold.
-    // Lower the bar for short queries so single-token matches still surface.
+    // Lower the bar so that meaningful matches surface even for
+    // conversational queries (which have many filler tokens diluting score).
     const nTokens = tokenWeights.length;
-    const minScore = nTokens <= 1 ? 0.15 : nTokens <= 2 ? 0.3 : 0.5;
+    const minScore = nTokens <= 1 ? 0.1 : nTokens <= 2 ? 0.2 : nTokens <= 5 ? 0.25 : 0.35;
 
     const scored: { fact: KnowledgeFact; score: number }[] = [];
     for (const f of this.facts.values()) {
@@ -484,7 +485,7 @@ export class KnowledgeStore {
 
     // When the threshold is low (short queries), cap results more tightly
     // to avoid flooding with marginally-relevant facts.
-    const effectiveLimit = nTokens <= 2 ? Math.min(limit, 10) : limit;
+    const effectiveLimit = nTokens <= 2 ? Math.min(limit, 10) : Math.min(limit, 15);
     return scored.slice(0, effectiveLimit).map((s) => s.fact);
   }
 

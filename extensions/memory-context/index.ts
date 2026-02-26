@@ -101,6 +101,189 @@ function estimateMessageTokens(msg: MessageLike): number {
 }
 
 /**
+ * Extract meaningful keywords from a conversational query for knowledge search.
+ *
+ * Strips common filler words (English + Chinese) so that the IDF-weighted
+ * knowledge search can focus on rare, meaningful terms.
+ */
+const STOP_WORDS_EN = new Set([
+  "a",
+  "an",
+  "the",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "being",
+  "have",
+  "has",
+  "had",
+  "do",
+  "does",
+  "did",
+  "will",
+  "would",
+  "shall",
+  "should",
+  "may",
+  "might",
+  "can",
+  "could",
+  "must",
+  "need",
+  "to",
+  "of",
+  "in",
+  "for",
+  "on",
+  "with",
+  "at",
+  "by",
+  "from",
+  "as",
+  "into",
+  "through",
+  "about",
+  "it",
+  "its",
+  "i",
+  "me",
+  "my",
+  "we",
+  "us",
+  "our",
+  "you",
+  "your",
+  "he",
+  "him",
+  "his",
+  "she",
+  "her",
+  "they",
+  "them",
+  "their",
+  "this",
+  "that",
+  "these",
+  "those",
+  "what",
+  "which",
+  "who",
+  "whom",
+  "how",
+  "when",
+  "where",
+  "why",
+  "if",
+  "then",
+  "so",
+  "but",
+  "and",
+  "or",
+  "not",
+  "no",
+  "yes",
+  "just",
+  "also",
+  "very",
+  "too",
+  "only",
+  "still",
+  "please",
+  "thanks",
+  "thank",
+  "ok",
+  "okay",
+  "well",
+  "now",
+  "here",
+  "there",
+]);
+const STOP_WORDS_ZH = new Set([
+  "的",
+  "是",
+  "了",
+  "在",
+  "我",
+  "你",
+  "他",
+  "她",
+  "它",
+  "也",
+  "都",
+  "就",
+  "和",
+  "有",
+  "这",
+  "那",
+  "不",
+  "会",
+  "到",
+  "着",
+  "过",
+  "得",
+  "地",
+  "吗",
+  "呢",
+  "吧",
+  "啊",
+  "么",
+  "与",
+  "及",
+  "把",
+  "被",
+  "让",
+  "之",
+  "其",
+  "一",
+  "个",
+  "些",
+  "什么",
+  "怎么",
+  "哪",
+  "吧",
+  "嗯",
+  "对",
+  "能",
+  "要",
+  "想",
+  "看",
+  "说",
+  "做",
+  "去",
+  "来",
+  "上",
+  "下",
+]);
+
+function extractKeywords(text: string): string {
+  const tokens: string[] = [];
+  // Split on whitespace and punctuation
+  const words = text
+    .replace(/[^\p{L}\p{N}\s@.+_-]/gu, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+
+  for (const w of words) {
+    const lower = w.toLowerCase();
+    if (lower.length <= 1 && !/[\u4e00-\u9fff]/.test(lower)) {
+      continue; // skip single non-CJK chars
+    }
+    if (STOP_WORDS_EN.has(lower)) {
+      continue;
+    }
+    // For CJK, skip single-char stop words
+    if (w.length === 1 && STOP_WORDS_ZH.has(w)) {
+      continue;
+    }
+    tokens.push(w);
+  }
+  return tokens.join(" ");
+}
+
+/**
  * Create an LLM call function for knowledge extraction using the compaction
  * model exposed via hook context. Returns undefined if model/apiKey unavailable.
  */
@@ -307,9 +490,10 @@ const memoryContextPlugin = {
           runtime.config.search,
         );
 
-        // ±2 timeline window expansion with decayed scores
-        const WINDOW_SIZE = 2;
-        const WINDOW_SCORE_DECAY = 0.15;
+        // ±1 timeline window expansion with decayed scores
+        // (was ±2, but 24×5=120 segments overwhelmed MMR and budget)
+        const WINDOW_SIZE = 1;
+        const WINDOW_SCORE_DECAY = 0.25;
         const windowedDetails = new Map<string, (typeof details)[number]>();
 
         for (const result of details) {
@@ -337,6 +521,17 @@ const memoryContextPlugin = {
         }
 
         const expandedDetails = Array.from(windowedDetails.values());
+
+        // ── Role-aware scoring: downweight assistant segments ──────────────
+        // Store is ~70% assistant messages; without downweighting, bot's own
+        // prior replies dominate recall and create repetitive noise.
+        const ASSISTANT_SCORE_FACTOR = 0.3;
+        for (const d of expandedDetails) {
+          if (d.segment.role === "assistant") {
+            d.score *= ASSISTANT_SCORE_FACTOR;
+          }
+        }
+
         console.info(
           `memory-context: window expansion ${details.length} → ${expandedDetails.length} segments`,
         );
@@ -349,13 +544,38 @@ const memoryContextPlugin = {
             content: d.segment.content,
           }),
         );
-        const mmrLimit = Math.max(searchLimit, expandedDetails.length);
+        const mmrLimit = Math.min(searchLimit, expandedDetails.length);
         const diverseDetails = mmrRerank(mmrCandidates, mmrLimit, { lambda: 0.7 });
 
-        const knowledge = runtime.knowledgeStore.search(query);
+        // ── Dedup: remove segments already present in the conversation ──────
+        // Build a set of content fingerprints from current messages to skip
+        // recalled segments that duplicate what's already in the context window.
+        const currentContentFP = new Set<string>();
+        for (const msg of messages) {
+          const text = extractText(msg);
+          if (text.length > 20) {
+            // Use first 80 chars (lowercased, whitespace-collapsed) as fingerprint
+            currentContentFP.add(text.replace(/\s+/g, " ").trim().toLowerCase().slice(0, 80));
+          }
+        }
+        const dedupedDetails = diverseDetails.filter((d) => {
+          const fp = d.segment.content.replace(/\s+/g, " ").trim().toLowerCase().slice(0, 80);
+          return !currentContentFP.has(fp);
+        });
+        const dedupRemoved = diverseDetails.length - dedupedDetails.length;
+        if (dedupRemoved > 0) {
+          console.info(`memory-context: dedup removed ${dedupRemoved} segments already in context`);
+        }
+
+        // ── Knowledge search with extracted keywords ────────────────────────
+        // The full conversational query often misses knowledge facts because
+        // IDF-weighted token matching penalizes high-frequency words.
+        // Extract key terms for a more focused knowledge search.
+        const knowledgeQuery = extractKeywords(query);
+        const knowledge = runtime.knowledgeStore.search(knowledgeQuery || query);
         const recalled = buildRecalledContextBlock(
           knowledge,
-          diverseDetails,
+          dedupedDetails,
           runtime.config.autoRecallMaxTokens,
         );
 
