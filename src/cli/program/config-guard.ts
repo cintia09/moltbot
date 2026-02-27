@@ -1,8 +1,9 @@
-import type { RuntimeEnv } from "../../runtime.js";
 import { loadAndMaybeMigrateDoctorConfig } from "../../commands/doctor-config-flow.js";
-import { readConfigFileSnapshot } from "../../config/config.js";
+import { loadConfig, readConfigFileSnapshot } from "../../config/config.js";
+import type { RuntimeEnv } from "../../runtime.js";
 import { colorize, isRich, theme } from "../../terminal/theme.js";
 import { shortenHomePath } from "../../utils.js";
+import { shouldMigrateStateFromPath } from "../argv.js";
 import { formatCliCommand } from "../command-format.js";
 
 const ALLOWED_INVALID_COMMANDS = new Set(["doctor", "logs", "health", "help", "status"]);
@@ -19,16 +20,28 @@ const ALLOWED_INVALID_GATEWAY_SUBCOMMANDS = new Set([
   "restart",
 ]);
 let didRunDoctorConfigFlow = false;
+let configSnapshotPromise: Promise<Awaited<ReturnType<typeof readConfigFileSnapshot>>> | null =
+  null;
 
 function formatConfigIssues(issues: Array<{ path: string; message: string }>): string[] {
   return issues.map((issue) => `- ${issue.path || "<root>"}: ${issue.message}`);
+}
+
+async function getConfigSnapshot() {
+  // Tests often mutate config fixtures; caching can make those flaky.
+  if (process.env.VITEST === "true") {
+    return readConfigFileSnapshot();
+  }
+  configSnapshotPromise ??= readConfigFileSnapshot();
+  return configSnapshotPromise;
 }
 
 export async function ensureConfigReady(params: {
   runtime: RuntimeEnv;
   commandPath?: string[];
 }): Promise<void> {
-  if (!didRunDoctorConfigFlow) {
+  const commandPath = params.commandPath ?? [];
+  if (!didRunDoctorConfigFlow && shouldMigrateStateFromPath(commandPath)) {
     didRunDoctorConfigFlow = true;
     await loadAndMaybeMigrateDoctorConfig({
       options: { nonInteractive: true },
@@ -36,9 +49,9 @@ export async function ensureConfigReady(params: {
     });
   }
 
-  const snapshot = await readConfigFileSnapshot();
-  const commandName = params.commandPath?.[0];
-  const subcommandName = params.commandPath?.[1];
+  const snapshot = await getConfigSnapshot();
+  const commandName = commandPath[0];
+  const subcommandName = commandPath[1];
   const allowInvalid = commandName
     ? ALLOWED_INVALID_COMMANDS.has(commandName) ||
       (commandName === "gateway" &&
@@ -54,6 +67,26 @@ export async function ensureConfigReady(params: {
   const invalid = snapshot.exists && !snapshot.valid;
   if (!invalid) {
     return;
+  }
+
+  // Before printing errors or exiting, attempt auto-repair via loadConfig()
+  // which calls tryRepairFromBackup() to surgically restore broken keys.
+  if (!allowInvalid) {
+    try {
+      loadConfig();
+      // loadConfig() succeeded → repair worked. Invalidate cached snapshot
+      // so subsequent reads see the repaired config.
+      configSnapshotPromise = null;
+      const repairedSnapshot = await getConfigSnapshot();
+      if (!repairedSnapshot.exists || repairedSnapshot.valid) {
+        const rich = isRich();
+        const muted = (value: string) => colorize(rich, theme.muted, value);
+        params.runtime.error(muted("Config auto-repaired from backup — continuing normally."));
+        return;
+      }
+    } catch {
+      // Repair failed or config still invalid — fall through to error output.
+    }
   }
 
   const rich = isRich();
